@@ -1,20 +1,70 @@
 import gradio as gr
-import requests
-import base64
 from PIL import Image
 from io import BytesIO
-import json
+import base64
+import torch
+from transformers import AutoProcessor, AutoModelForCausalLM
+import datetime
 
-# === 1. 설정 ===
-llava_api_url = "http://192.168.11.181:11434/api/generate"
-llava_model_name = "llava"
-llava_system_prompt = "You're participating in an interview..."
+# === 1. 설정 및 모델 로드 ===
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_name = "llava-hf/llava-1.5-7b-hf"  # 모델명 (변경 가능)
+system_prompt = "You're participating in an interview..."
 
-# === 2. 이미지 → base64 인코딩 ===
-def encode_image_to_base64(pil_image: Image.Image):
-    buffered = BytesIO()
-    pil_image.save(buffered, format="JPEG")
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+# 모델 및 프로세서 로드
+processor = AutoProcessor.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(
+    model_name, 
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    device_map="auto"
+)
+
+# === 2. 로컬 추론 함수 ===
+def generate_response(image: Image.Image, prompt: str, chat_history=None):
+    # 이전 대화 이력을 프롬프트에 포함
+    context_pairs = []
+    if chat_history:
+        for i in range(0, len(chat_history)-1, 2):
+            if i+1 < len(chat_history):
+                user_msg = chat_history[i][1]
+                ai_msg = chat_history[i+1][1]
+                context_pairs.append(f"사용자: {user_msg}\nAI: {ai_msg}")
+    
+    context = "\n".join(context_pairs)
+    
+    # 현재 사용자 메시지 추가
+    full_prompt = (
+        f"{system_prompt}\n\n"
+        f"이전 대화 내용:\n{context}\n\n"
+        f"사용자: {prompt}\nAI:"
+    )
+    
+    # 이미지와 텍스트 입력 준비
+    inputs = processor(
+        text=full_prompt,
+        images=image,
+        return_tensors="pt"
+    ).to(device)
+    
+    # 생성 파라미터 설정
+    generation_config = {
+        "max_new_tokens": 1024,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "do_sample": True,
+    }
+    
+    # 추론 실행
+    with torch.inference_mode():
+        output = model.generate(**inputs, **generation_config)
+    
+    # 생성된 텍스트 디코딩
+    generated_text = processor.decode(output[0], skip_special_tokens=True)
+    
+    # 시스템 프롬프트와 입력 제거하여 응답만 추출
+    response = generated_text.split("AI:")[-1].strip()
+    
+    return response
 
 # === 3. 채팅 처리 함수 ===
 def chat_with_model(chat_history, image: Image.Image, user_message: str):
@@ -28,42 +78,9 @@ def chat_with_model(chat_history, image: Image.Image, user_message: str):
         chat_history.append(("AI", "❌ 이미지를 반드시 업로드해주세요."))
         return chat_history, ""
     
-    # 이미지 base64 인코딩
-    encoded_image = encode_image_to_base64(image)
-    
-    # 이전 대화 이력을 프롬프트에 포함 (개선된 방식)
-    # 마지막에 추가된 현재 사용자 메시지는 제외하고 이전 대화만 포함
-    context_pairs = []
-    for i in range(0, len(chat_history)-1, 2):  # 사용자와 AI 응답이 쌍을 이루므로 2씩 증가
-        if i+1 < len(chat_history):  # AI 응답이 있는지 확인
-            user_msg = chat_history[i][1]
-            ai_msg = chat_history[i+1][1]
-            context_pairs.append(f"사용자: {user_msg}\nAI: {ai_msg}")
-    
-    context = "\n".join(context_pairs)
-    
-    # 현재 사용자 메시지 추가
-    full_prompt = (
-        f"{llava_system_prompt}\n\n"
-        f"이전 대화 내용:\n{context}\n\n"
-        f"사용자: {user_message}\nAI:"
-    )
-    
-    payload = {
-        "model": llava_model_name,
-        "prompt": full_prompt,
-        "images": [encoded_image],
-        "stream": False
-    }
-    
-    headers = {"Content-Type": "application/json"}
-    
     try:
-        response = requests.post(llava_api_url, headers=headers, data=json.dumps(payload), stream=True)
-        if response.ok:
-            bot_response = response.json().get("response", "(빈 응답)")
-        else:
-            bot_response = f"❌ 오류 {response.status_code}: {response.text}"
+        # 로컬 모델로 추론 실행
+        bot_response = generate_response(image, user_message, chat_history)
     except Exception as e:
         bot_response = f"❌ 예외 발생: {e}"
     
@@ -202,8 +219,21 @@ with gr.Blocks(css="""
         margin-top: 10px;
         text-align: center;
     }
+
+    /* 모델 정보 표시 */
+    .model-info {
+        margin-top: 15px;
+        padding: 8px;
+        background-color: #f0f0f0;
+        border-radius: 5px;
+        font-size: 13px;
+        color: #555;
+    }
 """) as demo:
-    gr.Markdown("## 💬 디자인 피드백 웹 앱 Demo")
+    gr.Markdown("## 💬 디자인 피드백 웹 앱 Demo (로컬 LLaVa 추론)")
+    
+    # 모델 정보 표시
+    gr.Markdown(f"**모델 정보**: {model_name} | 실행 환경: {device}", elem_classes="model-info")
     
     # 좌우 분할 레이아웃
     with gr.Row(equal_height=True):
@@ -241,8 +271,7 @@ with gr.Blocks(css="""
     
     # 현재 시간을 반환하는 함수
     def get_current_time():
-        from datetime import datetime
-        now = datetime.now()
+        now = datetime.datetime.now()
         return now.strftime("%p %I:%M").lower()  # 오전/오후 시:분
     
     # 대화 초기화 함수
@@ -306,4 +335,7 @@ with gr.Blocks(css="""
     )
 
 # 서버 실행
-demo.launch()
+if __name__ == "__main__":
+    print(f"모델을 로드했습니다: {model_name}")
+    print(f"실행 환경: {device}")
+    demo.launch()
