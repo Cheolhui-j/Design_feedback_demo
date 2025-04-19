@@ -337,5 +337,5 @@ with gr.Blocks(css="""
 
 # === 실행 ===
 if __name__ == "__main__":
-    print("웹 앱 실행 중...")
+    print("웹 앱 실행 중...", flush=True)
     demo.launch(share=True)
