@@ -11,8 +11,18 @@ def encode_image_to_base64(pil_image):
     pil_image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-# === 2. GPT-4o API 호출 ===
-def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_key: str, system_prompt: str):
+# === 2. 모델 목록 받아오기 함수 ===
+def get_openai_model_list(api_key):
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        models = client.models.list()
+        model_ids = [m.id for m in models.data if any(m.id.startswith(p) for p in ["gpt-4", "gpt-3.5"])]
+        return sorted(model_ids)
+    except Exception as e:
+        return [f"❌ 모델 목록 불러오기 실패: {e}"]
+
+# === 3. GPT-4o API 호출 ===
+def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_key: str, system_prompt: str, model_name: str):
     if not api_key:
         return "❌ API 키를 입력해주세요."
     
@@ -40,7 +50,7 @@ def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=model_name,
             messages=[system_msg, user_msg],
             temperature=0.7,
             max_tokens=1000
@@ -50,7 +60,7 @@ def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_
         return f"❌ OpenAI API 오류: {str(e)}"
 
 # === 3. 채팅 처리 ===
-def chat_with_model(chat_history, image, user_message, api_key, system_prompt):
+def chat_with_model(chat_history, image, user_message, api_key, system_prompt, model_name):
     if not user_message.strip():
         return chat_history, ""
 
@@ -60,7 +70,7 @@ def chat_with_model(chat_history, image, user_message, api_key, system_prompt):
         chat_history.append(("AI", "❌ 이미지를 반드시 업로드해주세요."))
         return chat_history, ""
     
-    bot_response = generate_response_openai(image, user_message, chat_history, api_key, system_prompt)
+    bot_response = generate_response_openai(image, user_message, chat_history, api_key, system_prompt, model_name)
     chat_history.append(("AI", bot_response))
     return chat_history, ""
 
@@ -206,8 +216,7 @@ with gr.Blocks(css="""
         color: #555;
     }
 """) as demo:
-    gr.Markdown("## 💬 디자인 피드백 웹 앱 Demo (GPT-4o 기반) + 🔑 API 키 입력")
-    gr.Markdown("**모델 정보**: GPT-4o (OpenAI API 사용)")
+    gr.Markdown("## 💬 디자인 피드백 웹 앱 Demo (OpenAI 모델 기반)")
 
     api_key_input = gr.Textbox(label="🔑 OpenAI API 키 입력", placeholder="sk-...", type="password")
     api_key_state = gr.State("")
@@ -219,6 +228,10 @@ with gr.Blocks(css="""
         value="You are a helpful design assistant."
     )
     system_prompt_state = gr.State("You are a helpful design assistant.")
+
+    # 🔹 모델 드롭다운 추가
+    model_dropdown = gr.Dropdown(label="🤖 사용할 모델 선택", choices=["(API 키 먼저 입력하세요)"])
+    model_state = gr.State("gpt-4o")
 
     # 좌우 분할 레이아웃
     with gr.Row(equal_height=True):
@@ -286,25 +299,33 @@ with gr.Blocks(css="""
                 </div>"""
         return f"<div class='chatbox'>{messages_html}</div>"
 
-    def submit_message(chat_state, image, message, api_key, system_prompt):
+    def submit_message(chat_state, image, message, api_key, system_prompt, model_name):
         if not message.strip():
             return chat_state, render_chat(chat_state), ""
-        new_history, _ = chat_with_model(chat_state, image, message, api_key, system_prompt)
+        new_history, _ = chat_with_model(chat_state, image, message, api_key, system_prompt, model_name)
         return new_history, render_chat(new_history), ""
+
+    def update_models(api_key):
+        models = get_openai_model_list(api_key)
+        default = "gpt-4o" if "gpt-4o" in models else models[0]
+        return gr.update(choices=models, value=default), default
 
     # === 이벤트 연결 ===
     api_key_input.change(lambda k: k, inputs=api_key_input, outputs=api_key_state)
+    api_key_input.change(fn=update_models, inputs=api_key_input, outputs=[model_dropdown, model_state])
+    model_dropdown.change(lambda m: m, inputs=model_dropdown, outputs=model_state)
     system_prompt_input.change(lambda p: p, inputs=system_prompt_input, outputs=system_prompt_state)
+
 
     submit_btn.click(
         fn=submit_message,
-        inputs=[chat_state, image_input, user_input, api_key_state, system_prompt_state],
+        inputs=[chat_state, image_input, user_input, api_key_state, system_prompt_state, model_state],
         outputs=[chat_state, chatbox, user_input]
     )
 
     user_input.submit(
         fn=submit_message,
-        inputs=[chat_state, image_input, user_input, api_key_state, system_prompt_state],
+        inputs=[chat_state, image_input, user_input, api_key_state, system_prompt_state, model_state],
         outputs=[chat_state, chatbox, user_input]
     )
 
@@ -316,5 +337,5 @@ with gr.Blocks(css="""
 
 # === 실행 ===
 if __name__ == "__main__":
-    print("🔑 API 키 입력 방식으로 GPT-4o 웹앱 실행 중...")
+    print("웹 앱 실행 중...")
     demo.launch(share=True)
