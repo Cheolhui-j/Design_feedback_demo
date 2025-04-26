@@ -61,14 +61,16 @@ def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_
         return f"❌ OpenAI API 오류: {str(e)}", None
 
 
-# === 4. 모달 이미지 HTML 생성 ===
+# === 4. 개선 이미지 + 선택 버튼 HTML 생성 ===
 def generate_modal_images_html(image_urls):
     modal_blocks = []
     for i, url in enumerate(image_urls):
         modal_blocks.append(f'''
-        <img class="modal-img" src="{url}" onclick="document.getElementById('modal-{i}').style.display='block'">
-        <div id="modal-{i}" class="modal-overlay" onclick="this.style.display='none'">
-            <img src="{url}" />
+        <div style="display:inline-block;text-align:center;margin:8px;">
+            <img class="modal-img" src="{url}" onclick="document.getElementById('modal-{i}').style.display='block'">
+            <div id="modal-{i}" class="modal-overlay" onclick="this.style.display='none'">
+                <img src="{url}" />
+            </div>
         </div>
         ''')
     modal_css = '''
@@ -128,10 +130,10 @@ def apply_chat_feedback_to_image(chat_history, image, api_key, dalle_model):
         modal_html = generate_modal_images_html(image_urls)
         chat_history.append(("AI", "아래는 개선된 UI 디자인 예시들입니다."))
         chat_history.append(("AI", modal_html))
-        return chat_history, ""
+        return chat_history,modal_html, image_urls
     except Exception as e:
         chat_history.append(("AI", f"❌ 이미지 생성 실패: {e}"))
-        return chat_history, ""
+        return chat_history, "", []
 
 # === 5. 기본 채팅 처리 ===
 def chat_with_model(chat_history, image, user_message, api_key, system_prompt, model_name):
@@ -305,11 +307,15 @@ with gr.Blocks(
 
         with gr.Column(scale=3):
             chat_state = gr.State([])
+            selected_image_url = gr.State("")
+            improved_image_urls = gr.State([])
             chatbox = gr.HTML(value="<div class='chatbox'><div class='history-indicator'>이전 대화 기록이 모델에 전달됩니다</div></div>", elem_id="chatbox")
             with gr.Row():
                 user_input = gr.Textbox(placeholder="질문을 입력하세요...", show_label=False)
                 submit_btn = gr.Button("전송", variant="primary")
                 apply_btn = gr.Button("🛠️ 개선 사항 적용", variant="secondary")
+                select_buttons = [gr.Button(f"✅ {i+1}번 이미지 선택") for i in range(3)]
+                apply_selected_btn = gr.Button("✅ 선택한 이미지 적용", variant="primary")
 
     def get_current_time():
         now = datetime.datetime.now()
@@ -333,10 +339,22 @@ with gr.Blocks(
             return chat_state, render_chat(chat_state), ""
         new_history, _, _ = chat_with_model(chat_state, image, message, api_key, system_prompt, model_name)
         return new_history, render_chat(new_history), ""
+    
+    def select_image(url, index):
+        return url[index]
+
+    def apply_selected_image(selected_url):
+        if selected_url:
+            img_data = requests.get(selected_url).content
+            img = Image.open(BytesIO(img_data))
+            return img
+        else:
+            print("empty\n")
+            return None
 
     def apply_button_action(chat_state, image, api_key, dalle_model):
-        new_history, _ = apply_chat_feedback_to_image(chat_state, image, api_key, dalle_model)
-        return new_history, render_chat(new_history)
+        new_history, modal_html, image_urls = apply_chat_feedback_to_image(chat_state, image, api_key, dalle_model)
+        return new_history, render_chat(new_history), image_urls
 
     def update_models(api_key):
         models = get_openai_model_list(api_key)
@@ -351,8 +369,18 @@ with gr.Blocks(
     submit_btn.click(fn=submit_message, inputs=[chat_state, image_input, user_input, api_key_state, system_prompt_state, model_state], outputs=[chat_state, chatbox, user_input])
     user_input.submit(fn=submit_message, inputs=[chat_state, image_input, user_input, api_key_state, system_prompt_state, model_state], outputs=[chat_state, chatbox, user_input])
 
-    apply_btn.click(fn=apply_button_action, inputs=[chat_state, image_input, api_key_state, gr.State("dall-e-3")], outputs=[chat_state, chatbox])
+    apply_btn.click(fn=apply_button_action, inputs=[chat_state, image_input, api_key_state, gr.State("dall-e-3")], outputs=[chat_state, chatbox, improved_image_urls])
     reset_btn.click(fn=reset_chat, inputs=[], outputs=[chat_state, chatbox, user_input])
+
+    select_buttons[0].click(fn=lambda urls: urls[0], inputs=[improved_image_urls], outputs=[selected_image_url])
+    select_buttons[1].click(fn=lambda urls: urls[1], inputs=[improved_image_urls], outputs=[selected_image_url])
+    select_buttons[2].click(fn=lambda urls: urls[2], inputs=[improved_image_urls], outputs=[selected_image_url])
+
+    apply_selected_btn.click(
+        fn=apply_selected_image,
+        inputs=[selected_image_url],
+        outputs=[image_input]
+    )
 
 if __name__ == "__main__":
     print("웹 앱 실행 중...", flush=True)
