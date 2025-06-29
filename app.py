@@ -11,22 +11,39 @@ def encode_image_to_base64(pil_image):
     pil_image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-# === 2. 모델 목록 받아오기 함수 ===
-def get_openai_model_list(api_key):
+# === 2. OpenRouter 모델 목록 받아오기 함수 ===
+def get_openrouter_model_list(api_key):
     try:
-        client = openai.OpenAI(api_key=api_key)
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
         models = client.models.list()
-        model_ids = [m.id for m in models.data if any(m.id.startswith(p) for p in ["gpt-4", "gpt-3.5"])]
-        return sorted(model_ids)
+        # Vision 모델만 필터링 (이미지 처리 가능한 모델들)
+        vision_models = []
+        for model in models.data:
+            model_id = model.id
+            # 주요 Vision 모델들 필터링
+            if any(keyword in model_id.lower() for keyword in [
+                "gpt-4", "claude", "gemini", "llava", "vision", "multimodal"
+            ]):
+                vision_models.append(model_id)
+        
+        return sorted(vision_models) if vision_models else [m.id for m in models.data[:20]]
     except Exception as e:
         return [f"❌ 모델 목록 불러오기 실패: {e}"]
 
-# === 3. GPT-4o API 호출 ===
-def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_key: str, system_prompt: str, model_name: str):
+# === 3. OpenRouter API 호출 ===
+def generate_response_openrouter(image: Image.Image, prompt: str, chat_history, api_key: str, system_prompt: str, model_name: str):
     if not api_key:
         return "❌ API 키를 입력해주세요."
     
-    client = openai.OpenAI(api_key=api_key)
+    # OpenRouter 클라이언트 설정
+    client = openai.OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    
     base64_image = encode_image_to_base64(image)
 
     # 대화 이력 구성
@@ -53,13 +70,18 @@ def generate_response_openai(image: Image.Image, prompt: str, chat_history, api_
             model=model_name,
             messages=[system_msg, user_msg],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1000,
+            # OpenRouter 추가 헤더 (선택사항)
+            extra_headers={
+                "HTTP-Referer": "http://localhost:7860",  # Gradio 기본 포트
+                "X-Title": "Design Feedback Chatbot"
+            }
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"❌ OpenAI API 오류: {str(e)}"
+        return f"❌ OpenRouter API 오류: {str(e)}"
 
-# === 3. 채팅 처리 ===
+# === 4. 채팅 처리 ===
 def chat_with_model(chat_history, image, user_message, api_key, system_prompt, model_name):
     if not user_message.strip():
         return chat_history, ""
@@ -70,11 +92,11 @@ def chat_with_model(chat_history, image, user_message, api_key, system_prompt, m
         chat_history.append(("AI", "❌ 이미지를 반드시 업로드해주세요."))
         return chat_history, ""
     
-    bot_response = generate_response_openai(image, user_message, chat_history, api_key, system_prompt, model_name)
+    bot_response = generate_response_openrouter(image, user_message, chat_history, api_key, system_prompt, model_name)
     chat_history.append(("AI", bot_response))
     return chat_history, ""
 
-# === 4. UI 구성 ===
+# === 5. UI 구성 ===
 with gr.Blocks(css="""
     /* 전체 컨테이너 스타일 */
     .container {
@@ -215,23 +237,52 @@ with gr.Blocks(css="""
         font-size: 13px;
         color: #555;
     }
+    
+    /* API 정보 스타일 */
+    .api-info {
+        margin-bottom: 15px;
+        padding: 10px;
+        background-color: #e6f3ff;
+        border-radius: 8px;
+        border-left: 4px solid #0066cc;
+    }
 """) as demo:
-    gr.Markdown("## 💬 디자인 피드백 웹 앱 Demo (OpenAI 모델 기반)")
+    gr.Markdown("## 💬 디자인 피드백 웹 앱 Demo (OpenRouter 기반)")
+    
+    # OpenRouter 사용 안내
+    with gr.Row():
+        gr.HTML("""
+        <div class='api-info'>
+            <strong>🔑 OpenRouter API 키 발급 방법:</strong><br>
+            1. <a href="https://openrouter.ai" target="_blank">OpenRouter.ai</a>에서 계정 생성<br>
+            2. API Keys 메뉴에서 새 키 생성<br>
+            3. 아래에 발급받은 키를 입력하세요
+        </div>
+        """)
 
-    api_key_input = gr.Textbox(label="🔑 OpenAI API 키 입력", placeholder="sk-...", type="password")
+    api_key_input = gr.Textbox(
+        label="🔑 OpenRouter API 키 입력", 
+        placeholder="sk-or-v1-...", 
+        type="password",
+        info="OpenRouter에서 발급받은 API 키를 입력하세요"
+    )
     api_key_state = gr.State("")
 
     # System Prompt 입력
     system_prompt_input = gr.Textbox(
         label="🛠️ System Prompt 입력 (선택)", 
         placeholder="ex: You are a UX/UI design expert...", 
-        value="You are a helpful design assistant."
+        value="You are a helpful design assistant that provides detailed feedback on UI/UX designs."
     )
-    system_prompt_state = gr.State("You are a helpful design assistant.")
+    system_prompt_state = gr.State("You are a helpful design assistant that provides detailed feedback on UI/UX designs.")
 
     # 🔹 모델 드롭다운 추가
-    model_dropdown = gr.Dropdown(label="🤖 사용할 모델 선택", choices=["(API 키 먼저 입력하세요)"])
-    model_state = gr.State("gpt-4o")
+    model_dropdown = gr.Dropdown(
+        label="🤖 사용할 모델 선택", 
+        choices=["(API 키 먼저 입력하세요)"],
+        info="Vision 기능을 지원하는 모델들이 우선 표시됩니다"
+    )
+    model_state = gr.State("openai/gpt-4o")
 
     # 좌우 분할 레이아웃
     with gr.Row(equal_height=True):
@@ -306,8 +357,22 @@ with gr.Blocks(css="""
         return new_history, render_chat(new_history), ""
 
     def update_models(api_key):
-        models = get_openai_model_list(api_key)
-        default = "gpt-4o" if "gpt-4o" in models else models[0]
+        if not api_key:
+            return gr.update(choices=["(API 키 먼저 입력하세요)"], value="(API 키 먼저 입력하세요)"), "(API 키 먼저 입력하세요)"
+        
+        models = get_openrouter_model_list(api_key)
+        
+        # 기본 모델 선택 (Vision 지원 모델 우선)
+        default_models = ["openai/gpt-4o", "anthropic/claude-3-5-sonnet", "google/gemini-pro-vision"]
+        default = None
+        for preferred in default_models:
+            if preferred in models:
+                default = preferred
+                break
+        
+        if not default:
+            default = models[0] if models and not models[0].startswith("❌") else "openai/gpt-4o"
+        
         return gr.update(choices=models, value=default), default
 
     # === 이벤트 연결 ===
@@ -315,7 +380,6 @@ with gr.Blocks(css="""
     api_key_input.change(fn=update_models, inputs=api_key_input, outputs=[model_dropdown, model_state])
     model_dropdown.change(lambda m: m, inputs=model_dropdown, outputs=model_state)
     system_prompt_input.change(lambda p: p, inputs=system_prompt_input, outputs=system_prompt_state)
-
 
     submit_btn.click(
         fn=submit_message,
@@ -337,5 +401,5 @@ with gr.Blocks(css="""
 
 # === 실행 ===
 if __name__ == "__main__":
-    print("웹 앱 실행 중...", flush=True)
+    print("OpenRouter 기반 웹 앱 실행 중...", flush=True)
     demo.launch(share=True)
